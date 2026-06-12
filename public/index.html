@@ -18,9 +18,48 @@
       <button data-target="accounts" class="nav-btn">Accounts</button>
       <button data-target="transactions" class="nav-btn">Transactions</button>
     </nav>
+    <div class="user-controls">
+      <span id="userLabel"></span>
+      <button id="logoutBtn" class="hidden">Logout</button>
+    </div>
   </header>
 
   <main class="container">
+    <section id="auth" class="panel">
+      <h2>Welcome — please Sign up or Login</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Sign up</h3>
+          <form id="signupForm">
+            <input name="name" placeholder="Full name" />
+            <input name="username" placeholder="Username" required />
+            <input name="password" placeholder="Password" type="password" required />
+            <input name="accountNumber" placeholder="Account number" required />
+            <button type="submit">Sign up</button>
+          </form>
+          <div class="result" id="signupResult"></div>
+        </div>
+
+        <div class="card">
+          <h3>User Login</h3>
+          <form id="loginForm">
+            <input name="username" placeholder="Username" required />
+            <input name="password" placeholder="Password" type="password" required />
+            <button type="submit">Login</button>
+          </form>
+          <div class="result" id="loginResult"></div>
+        </div>
+
+        <div class="card">
+          <h3>Admin Login</h3>
+          <form id="adminForm">
+            <input name="password" placeholder="Admin password" type="password" required />
+            <button type="submit">Admin Login</button>
+          </form>
+          <div class="result" id="adminResult"></div>
+        </div>
+      </div>
+    </section>
     <section id="dashboard" class="panel">
       <h2>Quick Actions</h2>
       <div class="grid">
