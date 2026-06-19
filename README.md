@@ -46,6 +46,9 @@ Transactions--><img width="959" height="416" alt="image" src="https://github.com
 
 Fds--><img width="955" height="430" alt="image" src="https://github.com/user-attachments/assets/8ccfe7cc-57ac-411a-8d2c-194385ea31c6" />
 
+inactivity--><img width="745" height="353" alt="image" src="https://github.com/user-attachments/assets/5a9da11f-f8da-45a3-9077-ce30872e1941" />
+
+
 and a lot more features just like an advanced bank website
 
 
