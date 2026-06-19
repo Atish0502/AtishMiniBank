@@ -1274,8 +1274,13 @@ qs('#btnDownloadStatement')?.addEventListener('click', async () => {
 
     accTxns.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF();
+   const jsPDFCtor = window.jspdf?.jsPDF;
+
+  if (!jsPDFCtor) {
+    throw new Error('jsPDF library failed to load.');
+  }
+
+const doc = new jsPDFCtor();
 
     doc.setFillColor(6, 11, 25);
     doc.rect(0, 0, 210, 40, 'F');
