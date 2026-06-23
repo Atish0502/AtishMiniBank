@@ -1,6 +1,6 @@
 # MiniBank
 
-A modern mini banking web application built with Node.js, Express, MongoDB Atlas, and a clean frontend UI. It supports core banking operations like account creation, deposits, withdrawals, transfers, balance lookup, transaction tracking, and admin access.
+A modern mini banking web application built with Node.js, Express, Neon PostgreSQL, and a clean frontend UI. It supports core banking operations like account creation, deposits, withdrawals, transfers, balance lookup, transaction tracking, and admin access.
 
 ## Features
 
@@ -13,14 +13,14 @@ A modern mini banking web application built with Node.js, Express, MongoDB Atlas
 * Admin dashboard access
 * Session timeout / inactivity logout
 * Responsive dark-themed UI
-* MongoDB Atlas integration
+* Neon PostgreSQL database integration
 * Render deployment ready
 
 ## Tech Stack
 
 * **Frontend:** HTML, CSS, JavaScript
 * **Backend:** Node.js, Express
-* **Database:** MongoDB Atlas
+* **Database:** Neon PostgreSQL
 * **Deployment:** Render
 * **Tools:** Git, GitHub, VS Code
 
@@ -91,7 +91,7 @@ npm install
 Create a `.env` file in the project root and add:
 
 ```env
-MONGODB_URI=your_mongodb_atlas_connection_string
+DATABASE_URL=your_neon_postgresql_connection_string
 PORT=3000
 SESSION_SECRET=your_secret_key
 ```
@@ -112,7 +112,7 @@ http://localhost:3000
 
 ## Environment Variables
 
-* `MONGODB_URI` — MongoDB Atlas connection string
+* `DATABASE_URL` — Neon PostgreSQL connection string
 * `PORT` — server port
 * `SESSION_SECRET` — session/authentication secret
 
@@ -141,13 +141,13 @@ Make sure the Render service has the correct environment variables configured.
 
 * `node_modules/` should not be committed to GitHub.
 * Keep your `.env` file private.
-* If you change database schema or indexes, make sure the Atlas collection data is compatible.
+* If you change database schema or indexes, update the table schema in db.js.
 
 ## Troubleshooting
 
-### MongoDB index or duplicate key error
+### PostgreSQL unique constraint error
 
-If deployment fails because of a duplicate key error, check the existing documents in MongoDB Atlas and remove conflicting data or update the index logic.
+If deployment fails because of a duplicate key or unique constraint error, check the existing records in the database and remove conflicting data.
 
 ### App not updating on Render
 

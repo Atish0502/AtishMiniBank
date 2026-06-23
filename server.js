@@ -1,45 +1,24 @@
 require('dotenv').config();
 const express = require("express");
-const { MongoClient, ObjectId } = require("mongodb");
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
+const db = require("./db");
 
 const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
-const url = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'atish1997';
-let client;
-let db;
 let currentAdminToken = null;
 
-// Connect to MongoDB
+// Connect to PostgreSQL database and start the server
 async function start() {
   try {
-    client = new MongoClient(url);
-    await client.connect();
+    await db.initDb();
   } catch (err) {
-    console.error('Initial MongoDB connect failed:', err.message || err);
-    try {
-      console.log('Retrying MongoDB connection with directConnection=true');
-      client = new MongoClient(url, { directConnection: true });
-      await client.connect();
-    } catch (err2) {
-      console.error('Direct MongoDB connect failed:', err2.message || err2);
-      process.exit(1);
-    }
+    console.error('Database connection / initialization failed:', err);
+    process.exit(1);
   }
-
-  db = client.db('bankDB');
-  console.log('Connected to MongoDB:', process.env.MONGODB_URI ? 'Atlas' : 'local');
-
-  // Setup Indexes for quick search & uniqueness
-  await db.collection("users").createIndex({ username: 1 }, { unique: true });
-  await db.collection("users").createIndex({ email: 1 }, { unique: true });
-  await db.collection("accounts").createIndex({ accountNumber: 1 }, { unique: true });
-  await db.collection("transactions").createIndex({ transactionId: 1 }, { unique: true });
-  await db.collection("scheduledTransfers").createIndex({ scheduledDate: 1 });
 
   // Start Scheduled Transfer Execution Interval (runs every 10 seconds)
   setInterval(processScheduledTransfers, 10000);
@@ -56,14 +35,14 @@ start();
 async function logAction(userId, username, action, details, req) {
   try {
     const ipAddress = req ? (req.headers['x-forwarded-for'] || req.socket.remoteAddress) : '127.0.0.1';
-    await db.collection('auditLogs').insertOne({
-      userId: userId ? new ObjectId(userId) : 'system',
-      username: username || 'system',
-      action,
-      details: typeof details === 'object' ? details : { message: details },
-      ipAddress,
-      timestamp: new Date()
-    });
+    const id = db.generateId();
+    const detailsJson = typeof details === 'object' ? details : { message: details };
+    
+    await db.query(
+      `INSERT INTO "auditLogs" ("_id", "userId", "username", "action", "details", "ipAddress", "timestamp") 
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [id, userId ? String(userId) : 'system', username || 'system', action, JSON.stringify(detailsJson), ipAddress, new Date()]
+    );
   } catch (err) {
     console.error('Audit logging failed:', err);
   }
@@ -72,13 +51,12 @@ async function logAction(userId, username, action, details, req) {
 // Notification Helper
 async function notifyUser(userId, title, message) {
   try {
-    await db.collection('notifications').insertOne({
-      userId: new ObjectId(userId),
-      title,
-      message,
-      read: false,
-      timestamp: new Date()
-    });
+    const id = db.generateId();
+    await db.query(
+      `INSERT INTO notifications ("_id", "userId", "title", "message", "read", "timestamp") 
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, String(userId), title, message, false, new Date()]
+    );
   } catch (err) {
     console.error('Notification creation failed:', err);
   }
@@ -88,8 +66,8 @@ async function notifyUser(userId, title, message) {
 async function generateAccountNumber() {
   while (true) {
     const num = Math.floor(100000 + Math.random() * 900000);
-    const existing = await db.collection("accounts").findOne({ accountNumber: num });
-    if (!existing) return num;
+    const res = await db.query('SELECT 1 FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [num]);
+    if (res.rowCount === 0) return num;
   }
 }
 
@@ -102,8 +80,9 @@ async function authenticate(req, res, next) {
       req.isAdmin = true;
       return next();
     }
-    const user = await db.collection('users').findOne({ token });
-    if (user) {
+    const userRes = await db.query('SELECT * FROM users WHERE token = $1 LIMIT 1', [token]);
+    if (userRes.rowCount > 0) {
+      const user = userRes.rows[0];
       if (user.status === 'suspended') {
         return res.status(403).send('Your account has been suspended by the administrator.');
       }
@@ -144,41 +123,38 @@ app.post('/signup', async (req, res) => {
   }
 
   try {
-    const existing = await db.collection('users').findOne({ $or: [{ username }, { email }] });
-    if (existing) {
+    const existingRes = await db.query('SELECT 1 FROM users WHERE username = $1 OR email = $2 LIMIT 1', [username, email]);
+    if (existingRes.rowCount > 0) {
       return res.status(400).send('Username or Email already registered.');
     }
 
     const hash = await bcrypt.hash(password, 10);
     const token = uuidv4();
-    const newUser = {
-      name,
-      username,
-      email,
-      mobile,
-      password: hash,
-      passwordPlain: password,
-      role: 'user',
-      status: 'active',
-      token,
-      createdAt: new Date()
+    const userId = db.generateId();
+    
+    // Default preferences object matching existing schema
+    const preferences = {
+      otpEnabled: false,
+      notifyEmail: true,
+      alertTransfer: true,
+      alertDeposit: true,
+      alertWithdraw: true
     };
 
-    const userResult = await db.collection('users').insertOne(newUser);
-    const userId = userResult.insertedId;
+    await db.query(
+      `INSERT INTO users ("_id", name, username, email, mobile, password, "passwordPlain", role, status, token, preferences, "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [userId, name, username, email, mobile, hash, password, 'user', 'active', token, JSON.stringify(preferences), new Date()]
+    );
 
     // Create the first savings account automatically
     const accountNumber = await generateAccountNumber();
-    const newAccount = {
-      ownerId: userId,
-      accountNumber,
-      type: 'Savings',
-      balance: 0,
-      status: 'active',
-      createdAt: new Date()
-    };
-
-    await db.collection('accounts').insertOne(newAccount);
+    const accountId = db.generateId();
+    await db.query(
+      `INSERT INTO accounts ("_id", "ownerId", "accountNumber", type, balance, status, "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [accountId, userId, accountNumber, 'Savings', 0, 'active', new Date()]
+    );
 
     // Logs & Notifications
     await logAction(userId, username, 'signup', { accountNumber }, req);
@@ -198,11 +174,12 @@ app.post('/login', async (req, res) => {
   if (!username || !password) return res.status(400).send('Username and password are required.');
 
   try {
-    const user = await db.collection('users').findOne({ username });
-    if (!user) {
+    const userRes = await db.query('SELECT * FROM users WHERE username = $1 LIMIT 1', [username]);
+    if (userRes.rowCount === 0) {
       await logAction(null, username, 'failed_login', 'Invalid username', req);
       return res.status(401).send('Invalid credentials.');
     }
+    const user = userRes.rows[0];
 
     if (user.status === 'suspended') {
       await logAction(user._id, username, 'failed_login', 'Suspended user tried to log in', req);
@@ -216,12 +193,13 @@ app.post('/login', async (req, res) => {
     }
 
     const token = uuidv4();
-    await db.collection('users').updateOne({ _id: user._id }, { $set: { token } });
+    await db.query('UPDATE users SET token = $1 WHERE "_id" = $2', [token, user._id]);
     
     await logAction(user._id, username, 'login', 'Successfully logged in', req);
 
-    const accounts = await db.collection('accounts').find({ ownerId: user._id }).toArray();
-    const userOut = { _id: user._id, name: user.name, username: user.username, email: user.email, mobile: user.mobile, role: user.role, status: user.status, accounts };
+    const accountsRes = await db.query('SELECT * FROM accounts WHERE "ownerId" = $1', [user._id]);
+    const accounts = accountsRes.rows;
+    const userOut = { _id: user._id, name: user.name, username: user.username, email: user.email, mobile: user.mobile, role: user.role, status: user.status, accounts, preferences: user.preferences };
     
     return res.json({ success: true, token, user: userOut });
   } catch (err) {
@@ -253,8 +231,9 @@ app.get('/me', authenticate, requireLogin, async (req, res) => {
   
   try {
     const user = req.user;
-    const accounts = await db.collection('accounts').find({ ownerId: user._id }).toArray();
-    const userOut = { _id: user._id, name: user.name, username: user.username, email: user.email, mobile: user.mobile, role: user.role, status: user.status, accounts };
+    const accountsRes = await db.query('SELECT * FROM accounts WHERE "ownerId" = $1', [user._id]);
+    const accounts = accountsRes.rows;
+    const userOut = { _id: user._id, name: user.name, username: user.username, email: user.email, mobile: user.mobile, role: user.role, status: user.status, accounts, preferences: user.preferences };
     return res.json({ success: true, user: userOut });
   } catch (err) {
     return res.status(500).send('Error loading profile.');
@@ -266,20 +245,42 @@ app.put('/me', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.status(403).send('Admins cannot modify profile details.');
   
   const { name, email, mobile } = req.body;
-  const update = {};
-  if (name) update.name = name;
-  if (email) update.email = email;
-  if (mobile) update.mobile = mobile;
+  const fields = [];
+  const vals = [];
+  let count = 1;
+  
+  if (name) {
+    fields.push(`name = $${count}`);
+    vals.push(name);
+    count++;
+  }
+  if (email) {
+    fields.push(`email = $${count}`);
+    vals.push(email);
+    count++;
+  }
+  if (mobile) {
+    fields.push(`mobile = $${count}`);
+    vals.push(mobile);
+    count++;
+  }
 
-  if (Object.keys(update).length === 0) return res.status(400).send('No fields to update.');
+  if (fields.length === 0) return res.status(400).send('No fields to update.');
+  
+  vals.push(req.user._id);
+  const qStr = `UPDATE users SET ${fields.join(', ')} WHERE "_id" = $${count}`;
 
   try {
-    await db.collection('users').updateOne({ _id: req.user._id }, { $set: update });
-    await logAction(req.user._id, req.user.username, 'profile_update', update, req);
+    await db.query(qStr, vals);
+    await logAction(req.user._id, req.user.username, 'profile_update', req.body, req);
     
-    const updatedUser = await db.collection('users').findOne({ _id: req.user._id });
-    const accounts = await db.collection('accounts').find({ ownerId: req.user._id }).toArray();
-    const userOut = { _id: updatedUser._id, name: updatedUser.name, username: updatedUser.username, email: updatedUser.email, mobile: updatedUser.mobile, role: updatedUser.role, status: updatedUser.status, accounts };
+    const updatedUserRes = await db.query('SELECT * FROM users WHERE "_id" = $1 LIMIT 1', [req.user._id]);
+    const updatedUser = updatedUserRes.rows[0];
+    
+    const accountsRes = await db.query('SELECT * FROM accounts WHERE "ownerId" = $1', [req.user._id]);
+    const accounts = accountsRes.rows;
+    
+    const userOut = { _id: updatedUser._id, name: updatedUser.name, username: updatedUser.username, email: updatedUser.email, mobile: updatedUser.mobile, role: updatedUser.role, status: updatedUser.status, accounts, preferences: updatedUser.preferences };
     return res.json({ success: true, user: userOut });
   } catch (err) {
     return res.status(500).send('Error updating profile.');
@@ -299,7 +300,9 @@ app.post('/accounts', authenticate, requireLogin, async (req, res) => {
 
   try {
     const accountNumber = await generateAccountNumber();
+    const accountId = db.generateId();
     const newAccount = {
+      _id: accountId,
       ownerId: req.user._id,
       accountNumber,
       type,
@@ -308,7 +311,12 @@ app.post('/accounts', authenticate, requireLogin, async (req, res) => {
       createdAt: new Date()
     };
 
-    await db.collection('accounts').insertOne(newAccount);
+    await db.query(
+      `INSERT INTO accounts ("_id", "ownerId", "accountNumber", type, balance, status, "createdAt") 
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [accountId, req.user._id, accountNumber, type, 0, 'active', newAccount.createdAt]
+    );
+
     await logAction(req.user._id, req.user.username, 'open_account', { accountNumber, type }, req);
     await notifyUser(req.user._id, 'New Account Opened', `Your new ${type} Account (Acct No: ${accountNumber}) is now active.`);
 
@@ -326,60 +334,47 @@ app.post('/accounts/:accountNumber/close', authenticate, requireLogin, async (re
   if (isNaN(accNum)) return res.status(400).send('Invalid account number.');
 
   try {
-    const account = await db.collection('accounts').findOne({ accountNumber: accNum, ownerId: req.user._id });
-    if (!account) return res.status(404).send('Account not found or you do not own it.');
+    const accountRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 AND "ownerId" = $2 LIMIT 1', [accNum, req.user._id]);
+    if (accountRes.rowCount === 0) return res.status(404).send('Account not found or you do not own it.');
+    const account = accountRes.rows[0];
 
     if (account.status === 'closed') {
       return res.status(400).send('Account is already closed.');
     }
 
     // Rule: Must maintain at least one active account
-    const activeAccountsCount = await db.collection('accounts').countDocuments({
-      ownerId: req.user._id,
-      status: 'active'
-    });
+    const activeCountRes = await db.query('SELECT COUNT(*) FROM accounts WHERE "ownerId" = $1 AND status = $2', [req.user._id, 'active']);
+    const activeAccountsCount = parseInt(activeCountRes.rows[0].count, 10);
 
     if (activeAccountsCount <= 1 && account.status === 'active') {
       return res.status(400).send('Closure denied: You must maintain at least one active account.');
     }
 
     // Rule: Balance must be 0
-    if (account.balance !== 0) {
+    if (parseFloat(account.balance) !== 0) {
       return res.status(400).send('Closure denied: Balance must be exactly ₹0.00.');
     }
 
     // Rule: No active FD linked
-    const activeFd = await db.collection('fixedDeposits').findOne({
-      accountNumber: accNum,
-      status: 'active'
-    });
-    if (activeFd) {
+    const activeFdRes = await db.query('SELECT 1 FROM "fixedDeposits" WHERE "accountNumber" = $1 AND status = $2 LIMIT 1', [accNum, 'active']);
+    if (activeFdRes.rowCount > 0) {
       return res.status(400).send('Closure denied: There is an active Fixed Deposit linked to this account.');
     }
 
     // Rule: No active RD linked
-    const activeRd = await db.collection('recurringDeposits').findOne({
-      accountNumber: accNum,
-      status: 'active'
-    });
-    if (activeRd) {
+    const activeRdRes = await db.query('SELECT 1 FROM "recurringDeposits" WHERE "accountNumber" = $1 AND status = $2 LIMIT 1', [accNum, 'active']);
+    if (activeRdRes.rowCount > 0) {
       return res.status(400).send('Closure denied: There is an active Recurring Deposit linked to this account.');
     }
 
     // Rule: No pending or active loan linked
-    const activeLoan = await db.collection('loans').findOne({
-      targetAccount: accNum,
-      status: { $in: ['pending', 'approved'] }
-    });
-    if (activeLoan) {
+    const activeLoanRes = await db.query('SELECT 1 FROM loans WHERE "targetAccount" = $1 AND status IN ($2, $3) LIMIT 1', [accNum, 'pending', 'approved']);
+    if (activeLoanRes.rowCount > 0) {
       return res.status(400).send('Closure denied: There is a pending or active loan linked to this account.');
     }
 
     // Proceed to close account
-    await db.collection('accounts').updateOne(
-      { accountNumber: accNum },
-      { $set: { status: 'closed' } }
-    );
+    await db.query('UPDATE accounts SET status = $1 WHERE "accountNumber" = $2', ['closed', accNum]);
 
     // Audit logs & Notifications
     await logAction(req.user._id, req.user.username, 'close_account', { accountNumber: accNum }, req);
@@ -403,18 +398,21 @@ app.post('/deposit', authenticate, requireLogin, async (req, res) => {
   }
 
   try {
-    const account = await db.collection('accounts').findOne({ accountNumber: accNum });
-    if (!account) return res.status(404).send('Account not found.');
+    const accountRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [accNum]);
+    if (accountRes.rowCount === 0) return res.status(404).send('Account not found.');
+    const account = accountRes.rows[0];
 
     // Users can only deposit into their own accounts, Admins can deposit to any
     if (!req.isAdmin && account.ownerId.toString() !== req.user._id.toString()) {
       return res.status(403).send('Not authorized to deposit to this account.');
     }
 
-    await db.collection('accounts').updateOne({ accountNumber: accNum }, { $inc: { balance: depAmt } });
+    await db.query('UPDATE accounts SET balance = balance + $1 WHERE "accountNumber" = $2', [depAmt, accNum]);
 
     const transactionId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
+    const txnId = db.generateId();
     const txn = {
+      _id: txnId,
       transactionId,
       type: 'deposit',
       accountNumber: accNum,
@@ -425,7 +423,12 @@ app.post('/deposit', authenticate, requireLogin, async (req, res) => {
       date: new Date()
     };
 
-    await db.collection('transactions').insertOne(txn);
+    await db.query(
+      `INSERT INTO transactions ("_id", "transactionId", type, "accountNumber", amount, description, status, "performedBy", date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [txnId, transactionId, 'deposit', accNum, depAmt, txn.description, 'success', txn.performedBy, txn.date]
+    );
+
     await logAction(req.isAdmin ? null : req.user._id, req.isAdmin ? 'admin' : req.user.username, 'deposit', { accountNumber: accNum, amount: depAmt, transactionId }, req);
     await notifyUser(account.ownerId, 'Deposit Received', `A deposit of ₹${depAmt} was credited to your account ${accNum}. (Ref: ${transactionId})`);
 
@@ -446,8 +449,9 @@ app.post('/withdraw', authenticate, requireLogin, async (req, res) => {
   }
 
   try {
-    const account = await db.collection('accounts').findOne({ accountNumber: accNum });
-    if (!account) return res.status(404).send('Account not found.');
+    const accountRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [accNum]);
+    if (accountRes.rowCount === 0) return res.status(404).send('Account not found.');
+    const account = accountRes.rows[0];
 
     // Only owner can withdraw (Admins can't withdraw from user accounts directly)
     if (req.isAdmin || account.ownerId.toString() !== req.user._id.toString()) {
@@ -458,22 +462,24 @@ app.post('/withdraw', authenticate, requireLogin, async (req, res) => {
       return res.status(403).send('This account is frozen. Withdrawals are not permitted.');
     }
 
-    if (account.balance < wdrAmt) {
+    if (parseFloat(account.balance) < wdrAmt) {
       return res.status(400).send('Insufficient balance.');
     }
 
     // Atomic withdrawal
-    const result = await db.collection('accounts').updateOne(
-      { accountNumber: accNum, balance: { $gte: wdrAmt }, status: 'active' },
-      { $inc: { balance: -wdrAmt } }
+    const result = await db.query(
+      'UPDATE accounts SET balance = balance - $1 WHERE "accountNumber" = $2 AND balance >= $1 AND status = $3',
+      [wdrAmt, accNum, 'active']
     );
 
-    if (result.modifiedCount === 0) {
+    if (result.rowCount === 0) {
       return res.status(400).send('Withdrawal failed. Check balance or account status.');
     }
 
     const transactionId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
+    const txnId = db.generateId();
     const txn = {
+      _id: txnId,
       transactionId,
       type: 'withdrawal',
       accountNumber: accNum,
@@ -484,7 +490,12 @@ app.post('/withdraw', authenticate, requireLogin, async (req, res) => {
       date: new Date()
     };
 
-    await db.collection('transactions').insertOne(txn);
+    await db.query(
+      `INSERT INTO transactions ("_id", "transactionId", type, "accountNumber", amount, description, status, "performedBy", date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [txnId, transactionId, 'withdrawal', accNum, wdrAmt, txn.description, 'success', txn.performedBy, txn.date]
+    );
+
     await logAction(req.user._id, req.user.username, 'withdrawal', { accountNumber: accNum, amount: wdrAmt, transactionId }, req);
     await notifyUser(req.user._id, 'Withdrawal Alert', `A withdrawal of ₹${wdrAmt} was made from your account ${accNum}. (Ref: ${transactionId})`);
 
@@ -512,11 +523,14 @@ app.post('/transfer/initiate', authenticate, requireLogin, async (req, res) => {
   }
 
   try {
-    const senderAcc = await db.collection('accounts').findOne({ accountNumber: fromAcc });
-    const receiverAcc = await db.collection('accounts').findOne({ accountNumber: toAcc });
+    const senderRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [fromAcc]);
+    const receiverRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [toAcc]);
 
-    if (!senderAcc) return res.status(404).send('Sender account not found.');
-    if (!receiverAcc) return res.status(404).send('Recipient account not found.');
+    if (senderRes.rowCount === 0) return res.status(404).send('Sender account not found.');
+    if (receiverRes.rowCount === 0) return res.status(404).send('Recipient account not found.');
+
+    const senderAcc = senderRes.rows[0];
+    const receiverAcc = receiverRes.rows[0];
 
     if (senderAcc.ownerId.toString() !== req.user._id.toString()) {
       return res.status(403).send('You do not own the sender account.');
@@ -526,7 +540,7 @@ app.post('/transfer/initiate', authenticate, requireLogin, async (req, res) => {
       return res.status(403).send('Transfer failed: Sender account is frozen.');
     }
 
-    if (senderAcc.balance < tfAmt) {
+    if (parseFloat(senderAcc.balance) < tfAmt) {
       return res.status(400).send('Insufficient balance.');
     }
 
@@ -536,16 +550,14 @@ app.post('/transfer/initiate', authenticate, requireLogin, async (req, res) => {
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
 
       // Invalidate previous OTPs
-      await db.collection('otps').deleteMany({ userId: req.user._id, action: 'transfer' });
+      await db.query('DELETE FROM otps WHERE "userId" = $1 AND action = $2', [req.user._id, 'transfer']);
 
-      await db.collection('otps').insertOne({
-        userId: req.user._id,
-        code,
-        action: 'transfer',
-        actionData: { from: fromAcc, to: toAcc, amount: tfAmt, description: description || 'Wire Transfer' },
-        expiresAt,
-        verified: false
-      });
+      const otpId = db.generateId();
+      await db.query(
+        `INSERT INTO otps ("_id", "userId", code, action, "actionData", "expiresAt", verified)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [otpId, req.user._id, code, 'transfer', JSON.stringify({ from: fromAcc, to: toAcc, amount: tfAmt, description: description || 'Wire Transfer' }), expiresAt, false]
+      );
 
       // Write a persistent notification record
       await notifyUser(
@@ -556,7 +568,6 @@ app.post('/transfer/initiate', authenticate, requireLogin, async (req, res) => {
 
       console.log(`[OTP TRIGGERED] User: ${req.user.username} | Action: Transfer | Code: ${code}`);
 
-      // We send the OTP code in the response *only* to make it mock-friendly for testing/grading.
       return res.json({
         otpRequired: true,
         message: 'A verification code is required for transfers greater than ₹1,000.',
@@ -578,26 +589,29 @@ app.post('/transfer/verify', authenticate, requireLogin, async (req, res) => {
   if (!otpCode) return res.status(400).send('Verification OTP code is required.');
 
   try {
-    const otpRecord = await db.collection('otps').findOne({
-      userId: req.user._id,
-      code: otpCode.trim(),
-      action: 'transfer',
-      expiresAt: { $gt: new Date() }
-    });
+    const otpRes = await db.query(
+      'SELECT * FROM otps WHERE "userId" = $1 AND code = $2 AND action = $3 AND "expiresAt" > $4 LIMIT 1',
+      [req.user._id, otpCode.trim(), 'transfer', new Date()]
+    );
 
-    if (!otpRecord) {
+    if (otpRes.rowCount === 0) {
       return res.status(400).send('Invalid or expired verification code.');
     }
+    const otpRecord = otpRes.rows[0];
 
     const { from, to, amount, description } = otpRecord.actionData;
-    const senderAcc = await db.collection('accounts').findOne({ accountNumber: from });
-    const receiverAcc = await db.collection('accounts').findOne({ accountNumber: to });
+    
+    const senderRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [from]);
+    const receiverRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [to]);
 
-    if (!senderAcc || !receiverAcc) {
+    if (senderRes.rowCount === 0 || receiverRes.rowCount === 0) {
       return res.status(400).send('Accounts involved in this transfer are no longer valid.');
     }
 
-    if (senderAcc.balance < amount) {
+    const senderAcc = senderRes.rows[0];
+    const receiverAcc = receiverRes.rows[0];
+
+    if (parseFloat(senderAcc.balance) < amount) {
       return res.status(400).send('Insufficient balance.');
     }
 
@@ -606,7 +620,7 @@ app.post('/transfer/verify', authenticate, requireLogin, async (req, res) => {
     }
 
     // Clean up OTP
-    await db.collection('otps').deleteOne({ _id: otpRecord._id });
+    await db.query('DELETE FROM otps WHERE "_id" = $1', [otpRecord._id]);
 
     // Execute transfer
     return executeTransfer(senderAcc, receiverAcc, amount, description, req, res);
@@ -621,34 +635,36 @@ async function executeTransfer(senderAcc, receiverAcc, amount, description, req,
   const transactionId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
 
   try {
-    // 1. Debit sender conditionally (must have balance, account must be active/active status)
-    const debitResult = await db.collection('accounts').updateOne(
-      { accountNumber: senderAcc.accountNumber, balance: { $gte: amount }, status: 'active' },
-      { $inc: { balance: -amount } }
+    // 1. Debit sender conditionally
+    const debitResult = await db.query(
+      'UPDATE accounts SET balance = balance - $1 WHERE "accountNumber" = $2 AND balance >= $1 AND status = $3',
+      [amount, senderAcc.accountNumber, 'active']
     );
 
-    if (debitResult.modifiedCount === 0) {
+    if (debitResult.rowCount === 0) {
       return res.status(400).send('Transfer failed: Insufficient balance or frozen account.');
     }
 
     // 2. Credit receiver
-    const creditResult = await db.collection('accounts').updateOne(
-      { accountNumber: receiverAcc.accountNumber },
-      { $inc: { balance: amount } }
+    const creditResult = await db.query(
+      'UPDATE accounts SET balance = balance + $1 WHERE "accountNumber" = $2',
+      [amount, receiverAcc.accountNumber]
     );
 
-    // Rollback if credit fails (e.g. account deleted mid-flight)
-    if (creditResult.matchedCount === 0) {
+    // Rollback if credit fails
+    if (creditResult.rowCount === 0) {
       console.error(`Credit failed for account ${receiverAcc.accountNumber}. Rolling back debit.`);
-      await db.collection('accounts').updateOne(
-        { accountNumber: senderAcc.accountNumber },
-        { $inc: { balance: amount } }
+      await db.query(
+        'UPDATE accounts SET balance = balance + $1 WHERE "accountNumber" = $2',
+        [amount, senderAcc.accountNumber]
       );
       return res.status(400).send('Transfer failed: Recipient account was invalid.');
     }
 
     // 3. Save transaction record
+    const txnId = db.generateId();
     const txn = {
+      _id: txnId,
       transactionId,
       type: 'transfer',
       fromAccount: senderAcc.accountNumber,
@@ -660,7 +676,11 @@ async function executeTransfer(senderAcc, receiverAcc, amount, description, req,
       date: new Date()
     };
 
-    await db.collection('transactions').insertOne(txn);
+    await db.query(
+      `INSERT INTO transactions ("_id", "transactionId", type, "fromAccount", "toAccount", amount, description, status, "performedBy", date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [txnId, transactionId, 'transfer', senderAcc.accountNumber, receiverAcc.accountNumber, amount, description, 'success', req.user.username, txn.date]
+    );
     
     // Audit & Notifications
     await logAction(req.user._id, req.user.username, 'transfer', { from: senderAcc.accountNumber, to: receiverAcc.accountNumber, amount, transactionId }, req);
@@ -678,23 +698,28 @@ async function executeTransfer(senderAcc, receiverAcc, amount, description, req,
 app.get('/transactions', authenticate, requireLogin, async (req, res) => {
   try {
     if (req.isAdmin) {
-      const data = await db.collection("transactions").find().sort({ date: -1 }).toArray();
-      return res.json(data);
+      const txnsRes = await db.query('SELECT * FROM transactions ORDER BY date DESC');
+      return res.json(txnsRes.rows);
     }
     
     // User mode: get all user accounts first
-    const accounts = await db.collection('accounts').find({ ownerId: req.user._id }).toArray();
-    const accNums = accounts.map(a => a.accountNumber);
+    const accountsRes = await db.query('SELECT "accountNumber" FROM accounts WHERE "ownerId" = $1', [req.user._id]);
+    const accNums = accountsRes.rows.map(a => a.accountNumber);
 
-    const data = await db.collection("transactions").find({
-      $or: [
-        { accountNumber: { $in: accNums } },
-        { fromAccount: { $in: accNums } },
-        { toAccount: { $in: accNums } }
-      ]
-    }).sort({ date: -1 }).toArray();
+    if (accNums.length === 0) {
+      return res.json([]);
+    }
 
-    return res.json(data);
+    const txnsRes = await db.query(
+      `SELECT * FROM transactions
+       WHERE "accountNumber" = ANY($1)
+          OR "fromAccount" = ANY($1)
+          OR "toAccount" = ANY($1)
+       ORDER BY date DESC`,
+      [accNums]
+    );
+
+    return res.json(txnsRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading transaction log.');
   }
@@ -706,8 +731,8 @@ app.get('/transactions', authenticate, requireLogin, async (req, res) => {
 app.get('/beneficiaries', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.status(403).send('Admins do not have beneficiaries.');
   try {
-    const list = await db.collection('beneficiaries').find({ userId: req.user._id }).toArray();
-    return res.json(list);
+    const listRes = await db.query('SELECT * FROM beneficiaries WHERE "userId" = $1', [req.user._id]);
+    return res.json(listRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading beneficiaries.');
   }
@@ -727,14 +752,16 @@ app.post('/beneficiaries', authenticate, requireLogin, async (req, res) => {
   try {
     // If bank is internal, check that account exists
     if (!bankName || bankName === 'MiniBank') {
-      const target = await db.collection('accounts').findOne({ accountNumber: accNum });
-      if (!target) return res.status(400).send('MiniBank recipient account number does not exist.');
+      const targetRes = await db.query('SELECT 1 FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [accNum]);
+      if (targetRes.rowCount === 0) return res.status(400).send('MiniBank recipient account number does not exist.');
     }
 
-    const exists = await db.collection('beneficiaries').findOne({ userId: req.user._id, accountNumber: accNum });
-    if (exists) return res.status(400).send('Beneficiary already saved.');
+    const existsRes = await db.query('SELECT 1 FROM beneficiaries WHERE "userId" = $1 AND "accountNumber" = $2 LIMIT 1', [req.user._id, accNum]);
+    if (existsRes.rowCount > 0) return res.status(400).send('Beneficiary already saved.');
 
+    const bId = db.generateId();
     const entry = {
+      _id: bId,
       userId: req.user._id,
       name,
       accountNumber: accNum,
@@ -742,7 +769,12 @@ app.post('/beneficiaries', authenticate, requireLogin, async (req, res) => {
       addedDate: new Date()
     };
 
-    await db.collection('beneficiaries').insertOne(entry);
+    await db.query(
+      `INSERT INTO beneficiaries ("_id", "userId", name, "accountNumber", "bankName", "addedDate")
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [bId, req.user._id, name, accNum, entry.bankName, entry.addedDate]
+    );
+
     await logAction(req.user._id, req.user.username, 'add_beneficiary', { name, accountNumber: accNum }, req);
 
     return res.json({ success: true, beneficiary: entry });
@@ -754,11 +786,8 @@ app.post('/beneficiaries', authenticate, requireLogin, async (req, res) => {
 // Delete Beneficiary
 app.delete('/beneficiaries/:id', authenticate, requireLogin, async (req, res) => {
   try {
-    const result = await db.collection('beneficiaries').deleteOne({
-      _id: new ObjectId(req.params.id),
-      userId: req.user._id
-    });
-    if (result.deletedCount === 0) return res.status(404).send('Beneficiary not found.');
+    const result = await db.query('DELETE FROM beneficiaries WHERE "_id" = $1 AND "userId" = $2', [req.params.id, req.user._id]);
+    if (result.rowCount === 0) return res.status(404).send('Beneficiary not found.');
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).send('Error deleting beneficiary.');
@@ -769,8 +798,8 @@ app.delete('/beneficiaries/:id', authenticate, requireLogin, async (req, res) =>
 app.get('/notifications', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.json([]);
   try {
-    const list = await db.collection('notifications').find({ userId: req.user._id }).sort({ timestamp: -1 }).toArray();
-    return res.json(list);
+    const listRes = await db.query('SELECT * FROM notifications WHERE "userId" = $1 ORDER BY timestamp DESC', [req.user._id]);
+    return res.json(listRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading notifications.');
   }
@@ -778,7 +807,7 @@ app.get('/notifications', authenticate, requireLogin, async (req, res) => {
 
 app.post('/notifications/read', authenticate, requireLogin, async (req, res) => {
   try {
-    await db.collection('notifications').updateMany({ userId: req.user._id }, { $set: { read: true } });
+    await db.query('UPDATE notifications SET read = true WHERE "userId" = $1', [req.user._id]);
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).send('Error marking notifications read.');
@@ -790,15 +819,15 @@ app.post('/notifications/read', authenticate, requireLogin, async (req, res) => 
 // Get System Stats Dashboard
 app.get('/admin/summary', authenticate, requireLogin, requireAdmin, async (req, res) => {
   try {
-    const totalUsers = await db.collection('users').countDocuments({ role: 'user' });
-    const totalAccounts = await db.collection('accounts').countDocuments();
-    const totalTxns = await db.collection('transactions').countDocuments();
-    
-    // Balance aggregation
-    const sumResult = await db.collection('accounts').aggregate([
-      { $group: { _id: null, totalBalance: { $sum: "$balance" } } }
-    ]).toArray();
-    const totalDepositPool = sumResult.length > 0 ? sumResult[0].totalBalance : 0;
+    const totalUsersRes = await db.query("SELECT COUNT(*) FROM users WHERE role = 'user'");
+    const totalAccountsRes = await db.query("SELECT COUNT(*) FROM accounts");
+    const totalTxnsRes = await db.query("SELECT COUNT(*) FROM transactions");
+    const sumResultRes = await db.query('SELECT SUM(balance) AS "totalBalance" FROM accounts');
+
+    const totalUsers = parseInt(totalUsersRes.rows[0].count, 10);
+    const totalAccounts = parseInt(totalAccountsRes.rows[0].count, 10);
+    const totalTxns = parseInt(totalTxnsRes.rows[0].count, 10);
+    const totalDepositPool = parseFloat(sumResultRes.rows[0].totalBalance || 0);
 
     return res.json({
       totalUsers,
@@ -815,8 +844,11 @@ app.get('/admin/summary', authenticate, requireLogin, requireAdmin, async (req, 
 // List all users (with their accounts)
 app.get('/admin/users', authenticate, requireLogin, requireAdmin, async (req, res) => {
   try {
-    const users = await db.collection('users').find({ role: 'user' }).toArray();
-    const accounts = await db.collection('accounts').find().toArray();
+    const usersRes = await db.query("SELECT * FROM users WHERE role = 'user'");
+    const accountsRes = await db.query("SELECT * FROM accounts");
+
+    const users = usersRes.rows;
+    const accounts = accountsRes.rows;
 
     const result = users.map(u => {
       const uAccs = accounts.filter(a => a.ownerId && u._id && a.ownerId.toString() === u._id.toString());
@@ -844,8 +876,8 @@ app.get('/admin/users', authenticate, requireLogin, requireAdmin, async (req, re
 // List system audit logs
 app.get('/admin/audit-logs', authenticate, requireLogin, requireAdmin, async (req, res) => {
   try {
-    const logs = await db.collection('auditLogs').find().sort({ timestamp: -1 }).limit(100).toArray();
-    return res.json(logs);
+    const logsRes = await db.query('SELECT * FROM "auditLogs" ORDER BY timestamp DESC LIMIT 100');
+    return res.json(logsRes.rows);
   } catch (err) {
     console.error('Error in /admin/audit-logs:', err);
     return res.status(500).send('Error loading system audit logs.');
@@ -859,10 +891,11 @@ app.post('/admin/freeze-account', authenticate, requireLogin, requireAdmin, asyn
   if (isNaN(accNum)) return res.status(400).send('Invalid account number.');
 
   try {
-    const result = await db.collection('accounts').updateOne({ accountNumber: accNum }, { $set: { status: 'frozen' } });
-    if (result.matchedCount === 0) return res.status(404).send('Account not found.');
+    const result = await db.query('UPDATE accounts SET status = $1 WHERE "accountNumber" = $2', ['frozen', accNum]);
+    if (result.rowCount === 0) return res.status(404).send('Account not found.');
     
-    const acc = await db.collection('accounts').findOne({ accountNumber: accNum });
+    const accRes = await db.query('SELECT "ownerId" FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [accNum]);
+    const acc = accRes.rows[0];
     await logAction(null, 'admin', 'freeze_account', { accountNumber: accNum }, req);
     await notifyUser(acc.ownerId, 'Account Frozen', `Your account ${accNum} has been frozen by the administrator. Contact support.`);
 
@@ -879,10 +912,11 @@ app.post('/admin/unfreeze-account', authenticate, requireLogin, requireAdmin, as
   if (isNaN(accNum)) return res.status(400).send('Invalid account number.');
 
   try {
-    const result = await db.collection('accounts').updateOne({ accountNumber: accNum }, { $set: { status: 'active' } });
-    if (result.matchedCount === 0) return res.status(404).send('Account not found.');
+    const result = await db.query('UPDATE accounts SET status = $1 WHERE "accountNumber" = $2', ['active', accNum]);
+    if (result.rowCount === 0) return res.status(404).send('Account not found.');
     
-    const acc = await db.collection('accounts').findOne({ accountNumber: accNum });
+    const accRes = await db.query('SELECT "ownerId" FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [accNum]);
+    const acc = accRes.rows[0];
     await logAction(null, 'admin', 'unfreeze_account', { accountNumber: accNum }, req);
     await notifyUser(acc.ownerId, 'Account Active', `Your account ${accNum} has been un-frozen and is active.`);
 
@@ -898,8 +932,8 @@ app.post('/admin/suspend-user', authenticate, requireLogin, requireAdmin, async 
   if (!userId) return res.status(400).send('User ID required.');
 
   try {
-    const result = await db.collection('users').updateOne({ _id: new ObjectId(userId) }, { $set: { status: 'suspended', token: null } });
-    if (result.matchedCount === 0) return res.status(404).send('User not found.');
+    const result = await db.query('UPDATE users SET status = $1, token = NULL WHERE "_id" = $2', ['suspended', userId]);
+    if (result.rowCount === 0) return res.status(404).send('User not found.');
 
     await logAction(null, 'admin', 'suspend_user', { userId }, req);
     return res.json({ success: true, message: 'User suspended.' });
@@ -914,8 +948,8 @@ app.post('/admin/activate-user', authenticate, requireLogin, requireAdmin, async
   if (!userId) return res.status(400).send('User ID required.');
 
   try {
-    const result = await db.collection('users').updateOne({ _id: new ObjectId(userId) }, { $set: { status: 'active' } });
-    if (result.matchedCount === 0) return res.status(404).send('User not found.');
+    const result = await db.query('UPDATE users SET status = $1 WHERE "_id" = $2', ['active', userId]);
+    if (result.rowCount === 0) return res.status(404).send('User not found.');
 
     await logAction(null, 'admin', 'activate_user', { userId }, req);
     return res.json({ success: true, message: 'User status restored to active.' });
@@ -937,14 +971,15 @@ app.post('/change-password', authenticate, requireLogin, async (req, res) => {
   }
 
   try {
-    const user = await db.collection('users').findOne({ _id: req.user._id });
+    const userRes = await db.query('SELECT * FROM users WHERE "_id" = $1 LIMIT 1', [req.user._id]);
+    const user = userRes.rows[0];
     const match = await bcrypt.compare(currentPassword, user.password);
     if (!match) {
       return res.status(400).send('Incorrect current password.');
     }
 
     const hash = await bcrypt.hash(newPassword, 10);
-    await db.collection('users').updateOne({ _id: req.user._id }, { $set: { password: hash, passwordPlain: newPassword } });
+    await db.query('UPDATE users SET password = $1, "passwordPlain" = $2 WHERE "_id" = $3', [hash, newPassword, req.user._id]);
     await logAction(req.user._id, req.user.username, 'change_password', 'Password updated successfully', req);
 
     return res.json({ success: true, message: 'Password updated successfully.' });
@@ -968,11 +1003,15 @@ app.put('/me/preferences', authenticate, requireLogin, async (req, res) => {
   };
 
   try {
-    await db.collection('users').updateOne({ _id: req.user._id }, { $set: { preferences: update } });
+    await db.query('UPDATE users SET preferences = $1 WHERE "_id" = $2', [JSON.stringify(update), req.user._id]);
     await logAction(req.user._id, req.user.username, 'update_preferences', update, req);
 
-    const user = await db.collection('users').findOne({ _id: req.user._id });
-    const accounts = await db.collection('accounts').find({ ownerId: user._id }).toArray();
+    const userRes = await db.query('SELECT * FROM users WHERE "_id" = $1 LIMIT 1', [req.user._id]);
+    const user = userRes.rows[0];
+    
+    const accountsRes = await db.query('SELECT * FROM accounts WHERE "ownerId" = $1', [user._id]);
+    const accounts = accountsRes.rows;
+    
     const userOut = { _id: user._id, name: user.name, username: user.username, email: user.email, mobile: user.mobile, role: user.role, status: user.status, accounts, preferences: user.preferences };
 
     return res.json({ success: true, user: userOut });
@@ -986,8 +1025,8 @@ app.put('/me/preferences', authenticate, requireLogin, async (req, res) => {
 app.get('/fixed-deposits', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.status(403).send('Admins do not have FDs.');
   try {
-    const list = await db.collection('fixedDeposits').find({ userId: req.user._id }).toArray();
-    return res.json(list);
+    const listRes = await db.query('SELECT * FROM "fixedDeposits" WHERE "userId" = $1', [req.user._id]);
+    return res.json(listRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading FDs.');
   }
@@ -1007,25 +1046,27 @@ app.post('/fixed-deposits', authenticate, requireLogin, async (req, res) => {
   }
 
   try {
-    const account = await db.collection('accounts').findOne({ accountNumber: accNum });
-    if (!account) return res.status(404).send('Source account not found.');
+    const accountRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [accNum]);
+    if (accountRes.rowCount === 0) return res.status(404).send('Source account not found.');
+    const account = accountRes.rows[0];
+
     if (account.ownerId.toString() !== req.user._id.toString()) {
       return res.status(403).send('Unauthorized account debit.');
     }
     if (account.status === 'frozen') {
       return res.status(403).send('Source account is frozen.');
     }
-    if (account.balance < fdAmt) {
+    if (parseFloat(account.balance) < fdAmt) {
       return res.status(400).send('Insufficient funds to lock FD.');
     }
 
     // Deduct principal
-    const debitResult = await db.collection('accounts').updateOne(
-      { accountNumber: accNum, balance: { $gte: fdAmt }, status: 'active' },
-      { $inc: { balance: -fdAmt } }
+    const debitResult = await db.query(
+      'UPDATE accounts SET balance = balance - $1 WHERE "accountNumber" = $2 AND balance >= $1 AND status = $3',
+      [fdAmt, accNum, 'active']
     );
 
-    if (debitResult.modifiedCount === 0) {
+    if (debitResult.rowCount === 0) {
       return res.status(400).send('FD placement failed.');
     }
 
@@ -1035,22 +1076,20 @@ app.post('/fixed-deposits', authenticate, requireLogin, async (req, res) => {
     const maturityAmount = fdAmt * Math.pow(1 + r / 4, 4 * t);
 
     const transactionId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
-    const txn = {
-      transactionId,
-      type: 'withdrawal',
-      accountNumber: accNum,
-      amount: fdAmt,
-      description: `Locked FD for ${months} Months`,
-      status: 'success',
-      performedBy: req.user.username,
-      date: new Date()
-    };
-    await db.collection('transactions').insertOne(txn);
+    const txnId = db.generateId();
+    const txnDate = new Date();
+    await db.query(
+      `INSERT INTO transactions ("_id", "transactionId", type, "accountNumber", amount, description, status, "performedBy", date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [txnId, transactionId, 'withdrawal', accNum, fdAmt, `Locked FD for ${months} Months`, 'success', req.user.username, txnDate]
+    );
 
     const maturesAt = new Date();
     maturesAt.setMonth(maturesAt.getMonth() + months);
 
+    const fdId = db.generateId();
     const newFD = {
+      _id: fdId,
       userId: req.user._id,
       accountNumber: accNum,
       principal: fdAmt,
@@ -1062,9 +1101,14 @@ app.post('/fixed-deposits', authenticate, requireLogin, async (req, res) => {
       maturesAt
     };
 
-    await db.collection('fixedDeposits').insertOne(newFD);
+    await db.query(
+      `INSERT INTO "fixedDeposits" ("_id", "userId", "accountNumber", principal, "interestRate", "durationMonths", "maturityAmount", status, "createdAt", "maturesAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [fdId, req.user._id, accNum, fdAmt, rate, months, newFD.maturityAmount, 'active', newFD.createdAt, maturesAt]
+    );
+
     await logAction(req.user._id, req.user.username, 'create_fd', { principal: fdAmt, durationMonths: months, maturesAt }, req);
-    await notifyUser(req.user._id, 'Fixed Deposit Placed', `Your FD of ₹${fdAmt.toFixed(2)} has been successfully created. Maturity: ₹${maturityAmount.toFixed(2)} on ${maturesAt.toLocaleDateString()}.`);
+    await notifyUser(req.user._id, 'Fixed Deposit Placed', `Your FD of ₹${fdAmt.toFixed(2)} has been successfully created. Maturity: ₹${newFD.maturityAmount.toFixed(2)} on ${maturesAt.toLocaleDateString()}.`);
 
     return res.json({ success: true, fixedDeposit: newFD });
   } catch (err) {
@@ -1077,8 +1121,8 @@ app.post('/fixed-deposits', authenticate, requireLogin, async (req, res) => {
 app.get('/recurring-deposits', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.status(403).send('Admins do not have RDs.');
   try {
-    const list = await db.collection('recurringDeposits').find({ userId: req.user._id }).toArray();
-    return res.json(list);
+    const listRes = await db.query('SELECT * FROM "recurringDeposits" WHERE "userId" = $1', [req.user._id]);
+    return res.json(listRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading RDs.');
   }
@@ -1098,25 +1142,27 @@ app.post('/recurring-deposits', authenticate, requireLogin, async (req, res) => 
   }
 
   try {
-    const account = await db.collection('accounts').findOne({ accountNumber: accNum });
-    if (!account) return res.status(404).send('Source account not found.');
+    const accountRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [accNum]);
+    if (accountRes.rowCount === 0) return res.status(404).send('Source account not found.');
+    const account = accountRes.rows[0];
+
     if (account.ownerId.toString() !== req.user._id.toString()) {
       return res.status(403).send('Unauthorized account access.');
     }
     if (account.status === 'frozen') {
       return res.status(403).send('Source account is frozen.');
     }
-    if (account.balance < deposit) {
+    if (parseFloat(account.balance) < deposit) {
       return res.status(400).send('Insufficient funds for the initial RD deposit.');
     }
 
     // Debit the first month's payment
-    const debitResult = await db.collection('accounts').updateOne(
-      { accountNumber: accNum, balance: { $gte: deposit }, status: 'active' },
-      { $inc: { balance: -deposit } }
+    const debitResult = await db.query(
+      'UPDATE accounts SET balance = balance - $1 WHERE "accountNumber" = $2 AND balance >= $1 AND status = $3',
+      [deposit, accNum, 'active']
     );
 
-    if (debitResult.modifiedCount === 0) {
+    if (debitResult.rowCount === 0) {
       return res.status(400).send('Initial RD payment failed.');
     }
 
@@ -1128,19 +1174,17 @@ app.post('/recurring-deposits', authenticate, requireLogin, async (req, res) => 
     }
 
     const transactionId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
-    const txn = {
-      transactionId,
-      type: 'withdrawal',
-      accountNumber: accNum,
-      amount: deposit,
-      description: `Initial RD Deposit - Month 1`,
-      status: 'success',
-      performedBy: req.user.username,
-      date: new Date()
-    };
-    await db.collection('transactions').insertOne(txn);
+    const txnId = db.generateId();
+    const txnDate = new Date();
+    await db.query(
+      `INSERT INTO transactions ("_id", "transactionId", type, "accountNumber", amount, description, status, "performedBy", date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [txnId, transactionId, 'withdrawal', accNum, deposit, `Initial RD Deposit - Month 1`, 'success', req.user.username, txnDate]
+    );
 
+    const rdId = db.generateId();
     const newRD = {
+      _id: rdId,
       userId: req.user._id,
       accountNumber: accNum,
       monthlyDeposit: deposit,
@@ -1154,9 +1198,14 @@ app.post('/recurring-deposits', authenticate, requireLogin, async (req, res) => 
       lastPaymentDate: new Date()
     };
 
-    await db.collection('recurringDeposits').insertOne(newRD);
+    await db.query(
+      `INSERT INTO "recurringDeposits" ("_id", "userId", "accountNumber", "monthlyDeposit", "interestRate", "durationMonths", "totalPaid", "monthsPaid", "estimatedMaturity", status, "createdAt", "lastPaymentDate")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [rdId, req.user._id, accNum, deposit, rate, months, deposit, 1, newRD.estimatedMaturity, 'active', newRD.createdAt, newRD.lastPaymentDate]
+    );
+
     await logAction(req.user._id, req.user.username, 'create_rd', { monthlyDeposit: deposit, durationMonths: months }, req);
-    await notifyUser(req.user._id, 'Recurring Deposit Started', `Your RD of ₹${deposit.toFixed(2)}/month has started. Estimated maturity: ₹${estimatedMaturity.toFixed(2)}.`);
+    await notifyUser(req.user._id, 'Recurring Deposit Started', `Your RD of ₹${deposit.toFixed(2)}/month has started. Estimated maturity: ₹${newRD.estimatedMaturity.toFixed(2)}.`);
 
     return res.json({ success: true, recurringDeposit: newRD });
   } catch (err) {
@@ -1170,66 +1219,63 @@ app.post('/recurring-deposits/:id/pay', authenticate, requireLogin, async (req, 
   if (req.isAdmin) return res.status(403).send('Admins cannot make RD payments.');
   
   try {
-    const rd = await db.collection('recurringDeposits').findOne({ _id: new ObjectId(req.params.id), userId: req.user._id });
-    if (!rd) return res.status(404).send('RD contract not found.');
+    const rdRes = await db.query('SELECT * FROM "recurringDeposits" WHERE "_id" = $1 AND "userId" = $2 LIMIT 1', [req.params.id, req.user._id]);
+    if (rdRes.rowCount === 0) return res.status(404).send('RD contract not found.');
+    const rd = rdRes.rows[0];
+
     if (rd.status !== 'active') return res.status(400).send('RD is no longer active.');
 
-    const account = await db.collection('accounts').findOne({ accountNumber: rd.accountNumber });
-    if (!account) return res.status(404).send('Associated account not found.');
+    const accountRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [rd.accountNumber]);
+    if (accountRes.rowCount === 0) return res.status(404).send('Associated account not found.');
+    const account = accountRes.rows[0];
+
     if (account.status === 'frozen') return res.status(403).send('Associated account is frozen.');
-    if (account.balance < rd.monthlyDeposit) {
+    if (parseFloat(account.balance) < parseFloat(rd.monthlyDeposit)) {
       return res.status(400).send('Insufficient funds for monthly RD payment.');
     }
 
-    const debitResult = await db.collection('accounts').updateOne(
-      { accountNumber: rd.accountNumber, balance: { $gte: rd.monthlyDeposit }, status: 'active' },
-      { $inc: { balance: -rd.monthlyDeposit } }
+    const debitResult = await db.query(
+      'UPDATE accounts SET balance = balance - $1 WHERE "accountNumber" = $2 AND balance >= $1 AND status = $3',
+      [rd.monthlyDeposit, rd.accountNumber, 'active']
     );
 
-    if (debitResult.modifiedCount === 0) {
+    if (debitResult.rowCount === 0) {
       return res.status(400).send('RD payment failed.');
     }
 
     const nextPaid = rd.monthsPaid + 1;
     const isCompleted = nextPaid >= rd.durationMonths;
-    const updateData = {
-      $inc: { totalPaid: rd.monthlyDeposit, monthsPaid: 1 },
-      $set: { lastPaymentDate: new Date() }
-    };
+    
+    let updateText = 'UPDATE "recurringDeposits" SET "totalPaid" = "totalPaid" + $1, "monthsPaid" = "monthsPaid" + 1, "lastPaymentDate" = $2';
+    const params = [rd.monthlyDeposit, new Date(), rd._id];
+    
     if (isCompleted) {
-      updateData.$set.status = 'completed';
+      updateText += ', status = \'completed\'';
     }
+    updateText += ' WHERE "_id" = $3';
 
-    await db.collection('recurringDeposits').updateOne({ _id: rd._id }, updateData);
+    await db.query(updateText, params);
 
     const transactionId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
-    const txn = {
-      transactionId,
-      type: 'withdrawal',
-      accountNumber: rd.accountNumber,
-      amount: rd.monthlyDeposit,
-      description: `RD Installment - Month ${nextPaid}`,
-      status: 'success',
-      performedBy: req.user.username,
-      date: new Date()
-    };
-    await db.collection('transactions').insertOne(txn);
+    const txnId = db.generateId();
+    const txnDate = new Date();
+    await db.query(
+      `INSERT INTO transactions ("_id", "transactionId", type, "accountNumber", amount, description, status, "performedBy", date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [txnId, transactionId, 'withdrawal', rd.accountNumber, rd.monthlyDeposit, `RD Installment - Month ${nextPaid}`, 'success', req.user.username, txnDate]
+    );
 
     await logAction(req.user._id, req.user.username, 'rd_payment', { rdId: rd._id, installment: nextPaid }, req);
     
     if (isCompleted) {
-      await db.collection('accounts').updateOne({ accountNumber: rd.accountNumber }, { $inc: { balance: rd.estimatedMaturity } });
+      await db.query('UPDATE accounts SET balance = balance + $1 WHERE "accountNumber" = $2', [rd.estimatedMaturity, rd.accountNumber]);
       const creditTxnId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
-      await db.collection('transactions').insertOne({
-        transactionId: creditTxnId,
-        type: 'deposit',
-        accountNumber: rd.accountNumber,
-        amount: rd.estimatedMaturity,
-        description: `RD Maturity Credit`,
-        status: 'success',
-        performedBy: 'system',
-        date: new Date()
-      });
+      const creditId = db.generateId();
+      await db.query(
+        `INSERT INTO transactions ("_id", "transactionId", type, "accountNumber", amount, description, status, "performedBy", date)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [creditId, creditTxnId, 'deposit', rd.accountNumber, rd.estimatedMaturity, `RD Maturity Credit`, 'success', 'system', new Date()]
+      );
       await notifyUser(req.user._id, 'Recurring Deposit Matured', `Your RD contract is complete. Maturity funds of ₹${rd.estimatedMaturity.toFixed(2)} credited back to account ${rd.accountNumber}.`);
     } else {
       await notifyUser(req.user._id, 'RD Installment Paid', `RD installment for month ${nextPaid} (₹${rd.monthlyDeposit.toFixed(2)}) processed.`);
@@ -1246,8 +1292,8 @@ app.post('/recurring-deposits/:id/pay', authenticate, requireLogin, async (req, 
 app.get('/loans', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.status(403).send('Admins do not have loans.');
   try {
-    const list = await db.collection('loans').find({ userId: req.user._id }).toArray();
-    return res.json(list);
+    const listRes = await db.query('SELECT * FROM loans WHERE "userId" = $1', [req.user._id]);
+    return res.json(listRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading loans.');
   }
@@ -1267,13 +1313,15 @@ app.post('/loans', authenticate, requireLogin, async (req, res) => {
   }
 
   try {
-    const account = await db.collection('accounts').findOne({ accountNumber: targetAcc, ownerId: req.user._id });
-    if (!account) return res.status(400).send('Invalid target account.');
+    const accountRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 AND "ownerId" = $2 LIMIT 1', [targetAcc, req.user._id]);
+    if (accountRes.rowCount === 0) return res.status(400).send('Invalid target account.');
 
     const r = (rate / 100) / 12;
     const emi = loanAmt * (r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1);
 
+    const loanId = db.generateId();
     const newLoan = {
+      _id: loanId,
       userId: req.user._id,
       amount: loanAmt,
       durationMonths: months,
@@ -1287,7 +1335,12 @@ app.post('/loans', authenticate, requireLogin, async (req, res) => {
       reviewRemarks: ''
     };
 
-    await db.collection('loans').insertOne(newLoan);
+    await db.query(
+      `INSERT INTO loans ("_id", "userId", amount, "durationMonths", "interestRate", "monthlyEmi", purpose, "targetAccount", status, "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [loanId, req.user._id, loanAmt, months, rate, newLoan.monthlyEmi, purpose, targetAcc, 'pending', newLoan.createdAt]
+    );
+
     await logAction(req.user._id, req.user.username, 'apply_loan', { amount: loanAmt, purpose }, req);
     await notifyUser(req.user._id, 'Loan Application Submitted', `Your loan application of ₹${loanAmt.toFixed(2)} is pending review.`);
 
@@ -1305,35 +1358,28 @@ app.post('/admin/loans/:id/review', authenticate, requireLogin, requireAdmin, as
   }
 
   try {
-    const loan = await db.collection('loans').findOne({ _id: new ObjectId(req.params.id) });
-    if (!loan) return res.status(404).send('Loan application not found.');
+    const loanRes = await db.query('SELECT * FROM loans WHERE "_id" = $1 LIMIT 1', [req.params.id]);
+    if (loanRes.rowCount === 0) return res.status(404).send('Loan application not found.');
+    const loan = loanRes.rows[0];
+
     if (loan.status !== 'pending') return res.status(400).send('Loan is already reviewed.');
 
-    const update = {
-      status: action,
-      reviewedAt: new Date(),
-      reviewRemarks: remarks || ''
-    };
-
-    await db.collection('loans').updateOne({ _id: loan._id }, { $set: update });
+    const reviewedAt = new Date();
+    await db.query(
+      'UPDATE loans SET status = $1, "reviewedAt" = $2, "reviewRemarks" = $3 WHERE "_id" = $4',
+      [action, reviewedAt, remarks || '', loan._id]
+    );
 
     if (action === 'approved') {
-      await db.collection('accounts').updateOne(
-        { accountNumber: loan.targetAccount },
-        { $inc: { balance: loan.amount } }
-      );
+      await db.query('UPDATE accounts SET balance = balance + $1 WHERE "accountNumber" = $2', [loan.amount, loan.targetAccount]);
 
       const transactionId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
-      await db.collection('transactions').insertOne({
-        transactionId,
-        type: 'deposit',
-        accountNumber: loan.targetAccount,
-        amount: loan.amount,
-        description: `Approved Loan Credit`,
-        status: 'success',
-        performedBy: 'admin',
-        date: new Date()
-      });
+      const txnId = db.generateId();
+      await db.query(
+        `INSERT INTO transactions ("_id", "transactionId", type, "accountNumber", amount, description, status, "performedBy", date)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [txnId, transactionId, 'deposit', loan.targetAccount, loan.amount, `Approved Loan Credit`, 'success', 'admin', new Date()]
+      );
 
       await notifyUser(loan.userId, 'Loan Approved', `Congratulations! Your loan of ₹${loan.amount.toFixed(2)} has been approved and credited. EMI: ₹${loan.monthlyEmi.toFixed(2)}/mo.`);
       await logAction(null, 'admin', 'approve_loan', { loanId: loan._id, amount: loan.amount }, req);
@@ -1354,19 +1400,25 @@ app.get('/analytics/summary', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.status(403).send('Admins do not have personal analytics.');
 
   try {
-    const accounts = await db.collection('accounts').find({ ownerId: req.user._id }).toArray();
+    const accountsRes = await db.query('SELECT * FROM accounts WHERE "ownerId" = $1', [req.user._id]);
+    const accounts = accountsRes.rows;
     const accNums = accounts.map(a => a.accountNumber);
+
+    if (accNums.length === 0) {
+      return res.json({ success: true, totalSpending: 0, totalIncome: 0, totalBalance: 0 });
+    }
 
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const transactions = await db.collection('transactions').find({
-      $or: [
-        { accountNumber: { $in: accNums } },
-        { fromAccount: { $in: accNums } },
-        { toAccount: { $in: accNums } }
-      ]
-    }).toArray();
+    const transactionsRes = await db.query(
+      `SELECT * FROM transactions
+       WHERE "accountNumber" = ANY($1)
+          OR "fromAccount" = ANY($1)
+          OR "toAccount" = ANY($1)`,
+      [accNums]
+    );
+    const transactions = transactionsRes.rows;
 
     let totalSpending = 0;
     let totalIncome = 0;
@@ -1393,7 +1445,7 @@ app.get('/analytics/summary', authenticate, requireLogin, async (req, res) => {
       success: true,
       totalSpending,
       totalIncome,
-      totalBalance: accounts.reduce((sum, a) => sum + a.balance, 0)
+      totalBalance: accounts.reduce((sum, a) => sum + parseFloat(a.balance), 0)
     });
   } catch (err) {
     return res.status(500).send('Error loading analytics.');
@@ -1412,8 +1464,10 @@ app.get('/transactions/monthly', authenticate, requireLogin, async (req, res) =>
   }
 
   try {
-    const account = await db.collection('accounts').findOne({ accountNumber: accNum });
-    if (!account) return res.status(404).send('Account not found.');
+    const accountRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [accNum]);
+    if (accountRes.rowCount === 0) return res.status(404).send('Account not found.');
+    const account = accountRes.rows[0];
+    
     if (!req.isAdmin && account.ownerId.toString() !== req.user._id.toString()) {
       return res.status(403).send('Unauthorized access to account logs.');
     }
@@ -1421,20 +1475,14 @@ app.get('/transactions/monthly', authenticate, requireLogin, async (req, res) =>
     const startDate = new Date(targetYear, targetMonth, 1);
     const endDate = new Date(targetYear, targetMonth + 1, 1);
 
-    const list = await db.collection('transactions').find({
-      $and: [
-        {
-          $or: [
-            { accountNumber: accNum },
-            { fromAccount: accNum },
-            { toAccount: accNum }
-          ]
-        },
-        { date: { $gte: startDate, $lt: endDate } }
-      ]
-    }).toArray();
+    const listRes = await db.query(
+      `SELECT * FROM transactions
+       WHERE ( "accountNumber" = $1 OR "fromAccount" = $1 OR "toAccount" = $1 )
+         AND date >= $2 AND date < $3`,
+      [accNum, startDate, endDate]
+    );
 
-    return res.json(list);
+    return res.json(listRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading monthly transactions.');
   }
@@ -1443,17 +1491,17 @@ app.get('/transactions/monthly', authenticate, requireLogin, async (req, res) =>
 // Raw Database Viewer for Admin Inspection
 app.get('/admin/raw-db', authenticate, requireLogin, requireAdmin, async (req, res) => {
   try {
-    const users = await db.collection('users').find().toArray();
-    const accounts = await db.collection('accounts').find().toArray();
-    const transactions = await db.collection('transactions').find().toArray();
-    const beneficiaries = await db.collection('beneficiaries').find().toArray();
-    const otps = await db.collection('otps').find().toArray();
-    const notifications = await db.collection('notifications').find().toArray();
-    const auditLogs = await db.collection('auditLogs').find().toArray();
-    const fixedDeposits = await db.collection('fixedDeposits').find().toArray();
-    const recurringDeposits = await db.collection('recurringDeposits').find().toArray();
-    const loans = await db.collection('loans').find().toArray();
-    const scheduledTransfers = await db.collection('scheduledTransfers').find().toArray();
+    const users = (await db.query('SELECT * FROM users')).rows;
+    const accounts = (await db.query('SELECT * FROM accounts')).rows;
+    const transactions = (await db.query('SELECT * FROM transactions')).rows;
+    const beneficiaries = (await db.query('SELECT * FROM beneficiaries')).rows;
+    const otps = (await db.query('SELECT * FROM otps')).rows;
+    const notifications = (await db.query('SELECT * FROM notifications')).rows;
+    const auditLogs = (await db.query('SELECT * FROM "auditLogs"')).rows;
+    const fixedDeposits = (await db.query('SELECT * FROM "fixedDeposits"')).rows;
+    const recurringDeposits = (await db.query('SELECT * FROM "recurringDeposits"')).rows;
+    const loans = (await db.query('SELECT * FROM loans')).rows;
+    const scheduledTransfers = (await db.query('SELECT * FROM "scheduledTransfers"')).rows;
 
     return res.json({
       users,
@@ -1494,15 +1542,21 @@ app.post('/transfers/schedule', authenticate, requireLogin, async (req, res) => 
   }
 
   try {
-    const senderAcc = await db.collection('accounts').findOne({ accountNumber: fromAcc, ownerId: req.user._id });
-    const receiverAcc = await db.collection('accounts').findOne({ accountNumber: toAcc });
+    const senderRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 AND "ownerId" = $2 LIMIT 1', [fromAcc, req.user._id]);
+    const receiverRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [toAcc]);
 
-    if (!senderAcc) return res.status(400).send('Invalid funding account.');
-    if (!receiverAcc) return res.status(400).send('Recipient account not found.');
+    if (senderRes.rowCount === 0) return res.status(400).send('Invalid funding account.');
+    if (receiverRes.rowCount === 0) return res.status(400).send('Recipient account not found.');
+    
+    const senderAcc = senderRes.rows[0];
+    const receiverAcc = receiverRes.rows[0];
+
     if (fromAcc === toAcc) return res.status(400).send('Cannot transfer to the same account.');
     if (senderAcc.status === 'frozen') return res.status(400).send('Funding account is frozen.');
 
+    const schedId = db.generateId();
     const newScheduled = {
+      _id: schedId,
       userId: req.user._id,
       fromAccount: fromAcc,
       toAccount: toAcc,
@@ -1513,7 +1567,12 @@ app.post('/transfers/schedule', authenticate, requireLogin, async (req, res) => 
       createdAt: new Date()
     };
 
-    await db.collection('scheduledTransfers').insertOne(newScheduled);
+    await db.query(
+      `INSERT INTO "scheduledTransfers" ("_id", "userId", "fromAccount", "toAccount", amount, description, "scheduledDate", status, "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [schedId, req.user._id, fromAcc, toAcc, tfAmt, newScheduled.description, executionDate, 'pending', newScheduled.createdAt]
+    );
+
     await logAction(req.user._id, req.user.username, 'schedule_transfer', { from: fromAcc, to: toAcc, amount: tfAmt, date: executionDate }, req);
     await notifyUser(req.user._id, 'Transfer Scheduled', `A transfer of ₹${tfAmt.toFixed(2)} to Account ${toAcc} has been scheduled for ${executionDate.toLocaleDateString()}.`);
 
@@ -1527,8 +1586,8 @@ app.post('/transfers/schedule', authenticate, requireLogin, async (req, res) => 
 app.get('/transfers/scheduled', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.status(403).send('Admins do not have personal scheduled transfers.');
   try {
-    const list = await db.collection('scheduledTransfers').find({ userId: req.user._id }).sort({ scheduledDate: 1 }).toArray();
-    return res.json(list);
+    const listRes = await db.query('SELECT * FROM "scheduledTransfers" WHERE "userId" = $1 ORDER BY "scheduledDate" ASC', [req.user._id]);
+    return res.json(listRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading scheduled transfers.');
   }
@@ -1537,11 +1596,13 @@ app.get('/transfers/scheduled', authenticate, requireLogin, async (req, res) => 
 app.delete('/transfers/scheduled/:id', authenticate, requireLogin, async (req, res) => {
   if (req.isAdmin) return res.status(403).send('Admins cannot cancel scheduled transfers directly.');
   try {
-    const transfer = await db.collection('scheduledTransfers').findOne({ _id: new ObjectId(req.params.id), userId: req.user._id });
-    if (!transfer) return res.status(404).send('Scheduled transfer not found.');
+    const transferRes = await db.query('SELECT * FROM "scheduledTransfers" WHERE "_id" = $1 AND "userId" = $2 LIMIT 1', [req.params.id, req.user._id]);
+    if (transferRes.rowCount === 0) return res.status(404).send('Scheduled transfer not found.');
+    const transfer = transferRes.rows[0];
+
     if (transfer.status !== 'pending') return res.status(400).send('Only pending transfers can be cancelled.');
 
-    await db.collection('scheduledTransfers').deleteOne({ _id: transfer._id });
+    await db.query('DELETE FROM "scheduledTransfers" WHERE "_id" = $1', [transfer._id]);
     await logAction(req.user._id, req.user.username, 'cancel_scheduled_transfer', { id: transfer._id }, req);
     await notifyUser(req.user._id, 'Scheduled Transfer Cancelled', `Your scheduled transfer of ₹${transfer.amount.toFixed(2)} to Account ${transfer.toAccount} has been cancelled.`);
 
@@ -1553,8 +1614,8 @@ app.delete('/transfers/scheduled/:id', authenticate, requireLogin, async (req, r
 
 app.get('/admin/transfers/scheduled', authenticate, requireLogin, requireAdmin, async (req, res) => {
   try {
-    const list = await db.collection('scheduledTransfers').find().sort({ scheduledDate: 1 }).toArray();
-    return res.json(list);
+    const listRes = await db.query('SELECT * FROM "scheduledTransfers" ORDER BY "scheduledDate" ASC');
+    return res.json(listRes.rows);
   } catch (err) {
     return res.status(500).send('Error loading system-wide scheduled transfers.');
   }
@@ -1563,15 +1624,14 @@ app.get('/admin/transfers/scheduled', authenticate, requireLogin, requireAdmin, 
 // Background Scheduled Transfers processing helpers
 
 async function processScheduledTransfers() {
-  if (!db) return;
   try {
     const now = new Date();
-    const pendingTransfers = await db.collection("scheduledTransfers").find({
-      status: "pending",
-      scheduledDate: { $lte: now }
-    }).toArray();
+    const pendingTransfersRes = await db.query(
+      'SELECT * FROM "scheduledTransfers" WHERE status = $1 AND "scheduledDate" <= $2',
+      ['pending', now]
+    );
 
-    for (const transfer of pendingTransfers) {
+    for (const transfer of pendingTransfersRes.rows) {
       await executeScheduledTransfer(transfer);
     }
   } catch (err) {
@@ -1584,74 +1644,72 @@ async function executeScheduledTransfer(transfer) {
   const transactionId = 'TXN-' + uuidv4().slice(0, 8).toUpperCase();
 
   try {
-    const senderAcc = await db.collection('accounts').findOne({ accountNumber: fromAccount });
-    const receiverAcc = await db.collection('accounts').findOne({ accountNumber: toAccount });
+    const senderRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [fromAccount]);
+    const receiverRes = await db.query('SELECT * FROM accounts WHERE "accountNumber" = $1 LIMIT 1', [toAccount]);
 
-    if (!senderAcc) {
+    if (senderRes.rowCount === 0) {
       throw new Error('Sender account not found.');
     }
-    if (!receiverAcc) {
+    if (receiverRes.rowCount === 0) {
       throw new Error('Recipient account not found.');
     }
+    
+    const senderAcc = senderRes.rows[0];
+    const receiverAcc = receiverRes.rows[0];
+
     if (senderAcc.status === 'frozen') {
       throw new Error('Sender account is frozen.');
     }
-    if (senderAcc.balance < amount) {
+    if (parseFloat(senderAcc.balance) < parseFloat(amount)) {
       throw new Error('Insufficient balance.');
     }
 
-    const debitResult = await db.collection('accounts').updateOne(
-      { accountNumber: fromAccount, balance: { $gte: amount }, status: 'active' },
-      { $inc: { balance: -amount } }
+    const debitResult = await db.query(
+      'UPDATE accounts SET balance = balance - $1 WHERE "accountNumber" = $2 AND balance >= $1 AND status = $3',
+      [amount, fromAccount, 'active']
     );
 
-    if (debitResult.modifiedCount === 0) {
+    if (debitResult.rowCount === 0) {
       throw new Error('Debit failed (account frozen or insufficient funds).');
     }
 
-    const creditResult = await db.collection('accounts').updateOne(
-      { accountNumber: toAccount },
-      { $inc: { balance: amount } }
+    const creditResult = await db.query(
+      'UPDATE accounts SET balance = balance + $1 WHERE "accountNumber" = $2',
+      [amount, toAccount]
     );
 
-    if (creditResult.matchedCount === 0) {
-      await db.collection('accounts').updateOne(
-        { accountNumber: fromAccount },
-        { $inc: { balance: amount } }
+    if (creditResult.rowCount === 0) {
+      await db.query(
+        'UPDATE accounts SET balance = balance + $1 WHERE "accountNumber" = $2',
+        [amount, fromAccount]
       );
       throw new Error('Credit failed (invalid recipient account).');
     }
 
-    const txn = {
-      transactionId,
-      type: 'transfer',
-      fromAccount,
-      toAccount,
-      amount,
-      description: `[Scheduled] ${description || 'Future Wire'}`,
-      status: 'success',
-      performedBy: 'system',
-      date: new Date()
-    };
-    await db.collection('transactions').insertOne(txn);
-
-    await db.collection('scheduledTransfers').updateOne(
-      { _id },
-      { $set: { status: 'executed', transactionId, executedAt: new Date() } }
+    const txnId = db.generateId();
+    const txnDate = new Date();
+    await db.query(
+      `INSERT INTO transactions ("_id", "transactionId", type, "fromAccount", "toAccount", amount, description, status, "performedBy", date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [txnId, transactionId, 'transfer', fromAccount, toAccount, amount, `[Scheduled] ${description || 'Future Wire'}`, 'success', 'system', txnDate]
     );
 
-    await notifyUser(senderAcc.ownerId, 'Scheduled Transfer Executed', `Your scheduled transfer of ₹${amount.toFixed(2)} to Account ${toAccount} succeeded. (Ref: ${transactionId})`);
-    await notifyUser(receiverAcc.ownerId, 'Scheduled Transfer Received', `You received ₹${amount.toFixed(2)} from Account ${fromAccount} via scheduled transfer. (Ref: ${transactionId})`);
+    await db.query(
+      'UPDATE "scheduledTransfers" SET status = $1, "transactionId" = $2, "executedAt" = $3 WHERE "_id" = $4',
+      ['executed', transactionId, new Date(), _id]
+    );
+
+    await notifyUser(senderAcc.ownerId, 'Scheduled Transfer Executed', `Your scheduled transfer of ₹${parseFloat(amount).toFixed(2)} to Account ${toAccount} succeeded. (Ref: ${transactionId})`);
+    await notifyUser(receiverAcc.ownerId, 'Scheduled Transfer Received', `You received ₹${parseFloat(amount).toFixed(2)} from Account ${fromAccount} via scheduled transfer. (Ref: ${transactionId})`);
     await logAction(senderAcc.ownerId, 'system', 'execute_scheduled_transfer', { from: fromAccount, to: toAccount, amount, transactionId }, null);
 
   } catch (err) {
     console.error(`Scheduled transfer ${_id} failed:`, err.message);
-    await db.collection('scheduledTransfers').updateOne(
-      { _id },
-      { $set: { status: 'failed', failureReason: err.message, failedAt: new Date() } }
+    await db.query(
+      'UPDATE "scheduledTransfers" SET status = $1, "failureReason" = $2, "failedAt" = $3 WHERE "_id" = $4',
+      ['failed', err.message, new Date(), _id]
     );
-    await notifyUser(userId, 'Scheduled Transfer Failed', `Your scheduled transfer of ₹${amount.toFixed(2)} to Account ${toAccount} failed. Reason: ${err.message}`);
+    await notifyUser(userId, 'Scheduled Transfer Failed', `Your scheduled transfer of ₹${parseFloat(amount).toFixed(2)} to Account ${toAccount} failed. Reason: ${err.message}`);
     await logAction(userId, 'system', 'failed_scheduled_transfer', { from: fromAccount, to: toAccount, amount, reason: err.message }, null);
   }
 }
-
