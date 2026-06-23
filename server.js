@@ -345,7 +345,7 @@ app.post('/accounts/:accountNumber/close', authenticate, requireLogin, async (re
 
     // Rule: Balance must be 0
     if (account.balance !== 0) {
-      return res.status(400).send('Closure denied: Balance must be exactly $0.00.');
+      return res.status(400).send('Closure denied: Balance must be exactly ₹0.00.');
     }
 
     // Rule: No active FD linked
@@ -427,9 +427,9 @@ app.post('/deposit', authenticate, requireLogin, async (req, res) => {
 
     await db.collection('transactions').insertOne(txn);
     await logAction(req.isAdmin ? null : req.user._id, req.isAdmin ? 'admin' : req.user.username, 'deposit', { accountNumber: accNum, amount: depAmt, transactionId }, req);
-    await notifyUser(account.ownerId, 'Deposit Received', `A deposit of $${depAmt} was credited to your account ${accNum}. (Ref: ${transactionId})`);
+    await notifyUser(account.ownerId, 'Deposit Received', `A deposit of ₹${depAmt} was credited to your account ${accNum}. (Ref: ${transactionId})`);
 
-    return res.json({ success: true, message: `Successfully deposited $${depAmt} into account ${accNum}.`, transaction: txn });
+    return res.json({ success: true, message: `Successfully deposited ₹${depAmt} into account ${accNum}.`, transaction: txn });
   } catch (err) {
     return res.status(500).send('Error performing deposit.');
   }
@@ -486,9 +486,9 @@ app.post('/withdraw', authenticate, requireLogin, async (req, res) => {
 
     await db.collection('transactions').insertOne(txn);
     await logAction(req.user._id, req.user.username, 'withdrawal', { accountNumber: accNum, amount: wdrAmt, transactionId }, req);
-    await notifyUser(req.user._id, 'Withdrawal Alert', `A withdrawal of $${wdrAmt} was made from your account ${accNum}. (Ref: ${transactionId})`);
+    await notifyUser(req.user._id, 'Withdrawal Alert', `A withdrawal of ₹${wdrAmt} was made from your account ${accNum}. (Ref: ${transactionId})`);
 
-    return res.json({ success: true, message: `Successfully withdrew $${wdrAmt} from account ${accNum}.`, transaction: txn });
+    return res.json({ success: true, message: `Successfully withdrew ₹${wdrAmt} from account ${accNum}.`, transaction: txn });
   } catch (err) {
     return res.status(500).send('Error performing withdrawal.');
   }
@@ -551,7 +551,7 @@ app.post('/transfer/initiate', authenticate, requireLogin, async (req, res) => {
       await notifyUser(
         req.user._id,
         'ATISH SECURE OTP',
-        `Security Alert: Your verification code for the high-value wire transfer of $${tfAmt.toFixed(2)} to Account ${toAcc} is: ${code}`
+        `Security Alert: Your verification code for the high-value wire transfer of ₹${tfAmt.toFixed(2)} to Account ${toAcc} is: ${code}`
       );
 
       console.log(`[OTP TRIGGERED] User: ${req.user.username} | Action: Transfer | Code: ${code}`);
@@ -559,7 +559,7 @@ app.post('/transfer/initiate', authenticate, requireLogin, async (req, res) => {
       // We send the OTP code in the response *only* to make it mock-friendly for testing/grading.
       return res.json({
         otpRequired: true,
-        message: 'A verification code is required for transfers greater than $1,000.',
+        message: 'A verification code is required for transfers greater than ₹1,000.',
         mockOtp: code
       });
     }
@@ -664,10 +664,10 @@ async function executeTransfer(senderAcc, receiverAcc, amount, description, req,
     
     // Audit & Notifications
     await logAction(req.user._id, req.user.username, 'transfer', { from: senderAcc.accountNumber, to: receiverAcc.accountNumber, amount, transactionId }, req);
-    await notifyUser(senderAcc.ownerId, 'Transfer Sent', `Sent $${amount} to account ${receiverAcc.accountNumber}. (Ref: ${transactionId})`);
-    await notifyUser(receiverAcc.ownerId, 'Transfer Received', `Received $${amount} from account ${senderAcc.accountNumber}. (Ref: ${transactionId})`);
+    await notifyUser(senderAcc.ownerId, 'Transfer Sent', `Sent ₹${amount} to account ${receiverAcc.accountNumber}. (Ref: ${transactionId})`);
+    await notifyUser(receiverAcc.ownerId, 'Transfer Received', `Received ₹${amount} from account ${senderAcc.accountNumber}. (Ref: ${transactionId})`);
 
-    return res.json({ success: true, message: `Successfully transferred $${amount} to account ${receiverAcc.accountNumber}.`, transaction: txn });
+    return res.json({ success: true, message: `Successfully transferred ₹${amount} to account ${receiverAcc.accountNumber}.`, transaction: txn });
   } catch (err) {
     console.error('Fatal execution error on transfer:', err);
     return res.status(500).send('Critical database error during transfer.');
@@ -1064,7 +1064,7 @@ app.post('/fixed-deposits', authenticate, requireLogin, async (req, res) => {
 
     await db.collection('fixedDeposits').insertOne(newFD);
     await logAction(req.user._id, req.user.username, 'create_fd', { principal: fdAmt, durationMonths: months, maturesAt }, req);
-    await notifyUser(req.user._id, 'Fixed Deposit Placed', `Your FD of $${fdAmt.toFixed(2)} has been successfully created. Maturity: $${maturityAmount.toFixed(2)} on ${maturesAt.toLocaleDateString()}.`);
+    await notifyUser(req.user._id, 'Fixed Deposit Placed', `Your FD of ₹${fdAmt.toFixed(2)} has been successfully created. Maturity: ₹${maturityAmount.toFixed(2)} on ${maturesAt.toLocaleDateString()}.`);
 
     return res.json({ success: true, fixedDeposit: newFD });
   } catch (err) {
@@ -1156,7 +1156,7 @@ app.post('/recurring-deposits', authenticate, requireLogin, async (req, res) => 
 
     await db.collection('recurringDeposits').insertOne(newRD);
     await logAction(req.user._id, req.user.username, 'create_rd', { monthlyDeposit: deposit, durationMonths: months }, req);
-    await notifyUser(req.user._id, 'Recurring Deposit Started', `Your RD of $${deposit.toFixed(2)}/month has started. Estimated maturity: $${estimatedMaturity.toFixed(2)}.`);
+    await notifyUser(req.user._id, 'Recurring Deposit Started', `Your RD of ₹${deposit.toFixed(2)}/month has started. Estimated maturity: ₹${estimatedMaturity.toFixed(2)}.`);
 
     return res.json({ success: true, recurringDeposit: newRD });
   } catch (err) {
@@ -1230,9 +1230,9 @@ app.post('/recurring-deposits/:id/pay', authenticate, requireLogin, async (req, 
         performedBy: 'system',
         date: new Date()
       });
-      await notifyUser(req.user._id, 'Recurring Deposit Matured', `Your RD contract is complete. Maturity funds of $${rd.estimatedMaturity.toFixed(2)} credited back to account ${rd.accountNumber}.`);
+      await notifyUser(req.user._id, 'Recurring Deposit Matured', `Your RD contract is complete. Maturity funds of ₹${rd.estimatedMaturity.toFixed(2)} credited back to account ${rd.accountNumber}.`);
     } else {
-      await notifyUser(req.user._id, 'RD Installment Paid', `RD installment for month ${nextPaid} ($${rd.monthlyDeposit.toFixed(2)}) processed.`);
+      await notifyUser(req.user._id, 'RD Installment Paid', `RD installment for month ${nextPaid} (₹${rd.monthlyDeposit.toFixed(2)}) processed.`);
     }
 
     return res.json({ success: true, completed: isCompleted });
@@ -1289,7 +1289,7 @@ app.post('/loans', authenticate, requireLogin, async (req, res) => {
 
     await db.collection('loans').insertOne(newLoan);
     await logAction(req.user._id, req.user.username, 'apply_loan', { amount: loanAmt, purpose }, req);
-    await notifyUser(req.user._id, 'Loan Application Submitted', `Your loan application of $${loanAmt.toFixed(2)} is pending review.`);
+    await notifyUser(req.user._id, 'Loan Application Submitted', `Your loan application of ₹${loanAmt.toFixed(2)} is pending review.`);
 
     return res.json({ success: true, loan: newLoan });
   } catch (err) {
@@ -1335,10 +1335,10 @@ app.post('/admin/loans/:id/review', authenticate, requireLogin, requireAdmin, as
         date: new Date()
       });
 
-      await notifyUser(loan.userId, 'Loan Approved', `Congratulations! Your loan of $${loan.amount.toFixed(2)} has been approved and credited. EMI: $${loan.monthlyEmi.toFixed(2)}/mo.`);
+      await notifyUser(loan.userId, 'Loan Approved', `Congratulations! Your loan of ₹${loan.amount.toFixed(2)} has been approved and credited. EMI: ₹${loan.monthlyEmi.toFixed(2)}/mo.`);
       await logAction(null, 'admin', 'approve_loan', { loanId: loan._id, amount: loan.amount }, req);
     } else {
-      await notifyUser(loan.userId, 'Loan Application Rejected', `Your loan application of $${loan.amount.toFixed(2)} was rejected. Remarks: ${remarks || 'None'}`);
+      await notifyUser(loan.userId, 'Loan Application Rejected', `Your loan application of ₹${loan.amount.toFixed(2)} was rejected. Remarks: ${remarks || 'None'}`);
       await logAction(null, 'admin', 'reject_loan', { loanId: loan._id, amount: loan.amount }, req);
     }
 
