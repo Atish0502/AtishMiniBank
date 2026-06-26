@@ -1613,3 +1613,71 @@ body.light-theme .toast {
 .modal-sub-tabs button.active {
   box-shadow: 0 0 15px rgba(16, 185, 129, 0.15);
 }
+
+/* Mobile Responsive Optimization Overrides */
+@media (max-width: 991px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .dashboard-grid > div,
+  .dashboard-grid > section,
+  .dashboard-grid > form {
+    grid-column: span 1 !important;
+  }
+  .panel-container {
+    padding: 16px !important;
+  }
+  .glass-card {
+    padding: 16px !important;
+  }
+  .net-worth-card {
+    padding: 16px !important;
+    gap: 16px !important;
+  }
+  .card-icon-bg {
+    width: 52px !important;
+    height: 52px !important;
+    border-radius: 12px !important;
+  }
+  .card-icon-bg i {
+    width: 24px !important;
+    height: 24px !important;
+  }
+  .net-worth-content h1 {
+    font-size: 26px !important;
+  }
+  .topbar {
+    padding: 0 16px !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .topbar {
+    padding: 0 10px !important;
+  }
+  .topbar-left {
+    gap: 8px !important;
+  }
+  .page-title {
+    font-size: 14px !important;
+  }
+  .topbar-right {
+    gap: 8px !important;
+  }
+  .user-status-indicator span {
+    display: none !important;
+  }
+  .user-status-indicator {
+    padding: 6px !important;
+    border-radius: 50% !important;
+    width: 28px !important;
+    height: 28px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+  .accounts-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
