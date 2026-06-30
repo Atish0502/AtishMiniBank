@@ -26,25 +26,37 @@ A modern mini banking web application built with Node.js, Express, Neon PostgreS
 
 ## Demo
 
-Live demo: [https://latestadvancedbankwebsite.onrender.com](https://latestadvancedbankwebsite.onrender.com)
+Live demo: https://atishminibank.onrender.com/
 
 ## Screenshots
 The starting sign up/Login Page
-<img width="959" height="466" alt="image" src="https://github.com/user-attachments/assets/332b0b3a-85a4-46a1-b215-940ab1a7b771" />
+<img width="951" height="467" alt="image" src="https://github.com/user-attachments/assets/89b63f4e-6295-4743-981a-f64da9cfff95" />
+
 
 
 Toggling dark and light mode
-<img width="947" height="428" alt="image" src="https://github.com/user-attachments/assets/b7897402-fc03-4701-ae6d-9fa9e590b45f" />
-<img width="959" height="445" alt="image" src="https://github.com/user-attachments/assets/4f945294-1197-4db8-bdb3-0ff70553869d" />
+<img width="959" height="435" alt="image" src="https://github.com/user-attachments/assets/efc859c9-e942-4979-8fb2-63e9d6450907" />
+<img width="950" height="469" alt="image" src="https://github.com/user-attachments/assets/c3dca8ec-12b4-438c-a61f-5f37b0fa210e" />
 
 
-Dashboard--><img width="959" height="430" alt="image" src="https://github.com/user-attachments/assets/75e0f291-a06a-4ca7-8f40-65c70fe6c8ad" />
-Accounts--><img width="955" height="434" alt="image" src="https://github.com/user-attachments/assets/c0dbf2ff-a2a2-45d2-af94-80284513ebe1" />
+Dashboard--><img width="950" height="469" alt="image" src="https://github.com/user-attachments/assets/4fe89171-ec3c-4064-90f3-14c9af7aff0f" />
 
-Transactions--><img width="959" height="416" alt="image" src="https://github.com/user-attachments/assets/a31fa7a5-794c-4498-9791-5a1159cdabe2" />
+Accounts--><img width="959" height="384" alt="image" src="https://github.com/user-attachments/assets/6a2a5eb5-337d-4b16-afb4-65368fc4180e" />
+
+
+Transactions--><img width="959" height="373" alt="image" src="https://github.com/user-attachments/assets/eac3a3bb-1eea-424d-a2f6-f199614970f8" />
 
 
 Fds--><img width="955" height="430" alt="image" src="https://github.com/user-attachments/assets/8ccfe7cc-57ac-411a-8d2c-194385ea31c6" />
+loans--->    <img width="952" height="413" alt="image" src="https://github.com/user-attachments/assets/72076f91-6760-4ad5-acbe-ccef5b14b023" />
+
+
+
+<img width="774" height="358" alt="image" src="https://github.com/user-attachments/assets/21af7ed5-073e-4392-aab1-a992167ce095" />
+
+
+
+
 
 inactivity--><img width="745" height="353" alt="image" src="https://github.com/user-attachments/assets/5a9da11f-f8da-45a3-9077-ce30872e1941" />
 
@@ -76,7 +88,7 @@ latestAdvancedBankWebsite/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/Atish0502/latestAdvancedBankWebsite.git
+git clone https://github.com/Atish0502/AtishMiniBank.git
 cd latestAdvancedBankWebsite
 ```
 
